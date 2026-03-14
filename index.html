@@ -329,109 +329,138 @@
             }
         }
 
-        // 连接到信令服务器 (使用更稳定的WebRTC测试服务器)
+        // 连接到信令服务器 (使用多个备选服务器)
         function connectToSignalingServer() {
             updateConnectionStatus('connecting');
-            socket = new WebSocket('wss://rtc-signaling-server.fly.dev/');
-
-            socket.onopen = function() {
-                console.log('连接到信令服务器');
-                updateConnectionStatus('connected');
-                showToast('信令服务器连接成功', 'success');
-                socket.send(JSON.stringify({
-                    type: 'join',
-                    room: roomId,
-                    id: userId
-                }));
-            };
-
-            socket.onerror = function(error) {
-                console.error('信令服务器连接错误:', error);
-                updateConnectionStatus('disconnected');
-                showToast('信令服务器连接失败，但仍可使用基本视频播放功能', 'error');
-            };
-
-            socket.onclose = function() {
-                console.log('信令服务器连接关闭');
-                updateConnectionStatus('disconnected');
-                showToast('信令服务器连接已关闭', 'info');
-            };
-
-            socket.onmessage = function(event) {
-                try {
-                    const data = JSON.parse(event.data);
-                    
-                    if (data.room !== roomId) return;
-                    
-                    switch (data.type) {
-                        case 'user-joined':
-                            if (data.id !== userId) {
-                                addUser(data.id);
-                                sendChatMessage('系统', `${data.id} 加入了房间`);
-                                showToast(`${data.id} 加入了房间`, 'info');
-                                
-                                // 为新用户创建P2P连接
-                                const peer = new SimplePeer({
-                                    initiator: true,
-                                    trickle: false,
-                                    config: {
-                                        iceServers: [
-                                            { urls: 'stun:stun.l.google.com:19302' },
-                                            { urls: 'stun:stun1.l.google.com:19302' }
-                                        ]
-                                    }
-                                });
-                                
-                                peer.on('signal', function(data) {
-                                    socket.send(JSON.stringify({
-                                        type: 'signal',
-                                        room: roomId,
-                                        to: data.id,
-                                        from: userId,
-                                        signal: data
-                                    }));
-                                });
-                                
-                                setupPeerEvents(peer, data.id);
-                                peers[data.id] = peer;
-                            }
-                            break;
-                            
-                        case 'signal':
-                            if (data.to !== userId) return;
-                            
-                            let peer;
-                            if (!peers[data.from]) {
-                                peer = new SimplePeer({
-                                    initiator: false,
-                                    trickle: false,
-                                    config: {
-                                        iceServers: [
-                                            { urls: 'stun:stun.l.google.com:19302' },
-                                            { urls: 'stun:stun1.l.google.com:19302' }
-                                        ]
-                                    }
-                                });
-                                setupPeerEvents(peer, data.from);
-                                peers[data.from] = peer;
-                            } else {
-                                peer = peers[data.from];
-                            }
-                            
-                            peer.signal(data.signal);
-                            break;
-                            
-                        case 'user-left':
-                            removeUser(data.id);
-                            sendChatMessage('系统', `${data.id} 离开了房间`);
-                            showToast(`${data.id} 离开了房间`, 'info');
-                            delete peers[data.id];
-                            break;
-                    }
-                } catch (error) {
-                    console.error('处理消息时出错:', error);
+            
+            // 服务器列表（按优先级排序）
+            const servers = [
+                'wss://signal.rtc.gg/',
+                'wss://sfu.nexuswebrtc.com:443',
+                'wss://webrtc-signaling.com:8443',
+                'wss://signaling.roomkit.io/'
+            ];
+            
+            let currentServerIndex = 0;
+            
+            function tryNextServer() {
+                if (currentServerIndex >= servers.length) {
+                    updateConnectionStatus('disconnected');
+                    showToast('所有信令服务器连接失败，将使用本地模式', 'error');
+                    return;
                 }
-            };
+                
+                const serverUrl = servers[currentServerIndex];
+                currentServerIndex++;
+                
+                console.log(`尝试连接到信令服务器: ${serverUrl}`);
+                
+                socket = new WebSocket(serverUrl);
+                
+                socket.onopen = function() {
+                    console.log('连接到信令服务器成功:', serverUrl);
+                    updateConnectionStatus('connected');
+                    showToast('信令服务器连接成功', 'success');
+                    socket.send(JSON.stringify({
+                        type: 'join',
+                        room: roomId,
+                        id: userId
+                    }));
+                };
+                
+                socket.onerror = function(error) {
+                    console.error('信令服务器连接错误:', error);
+                    // 尝试下一个服务器
+                    tryNextServer();
+                };
+                
+                socket.onclose = function() {
+                    console.log('信令服务器连接关闭:', serverUrl);
+                    updateConnectionStatus('disconnected');
+                    showToast('信令服务器连接已关闭，正在尝试重新连接...', 'info');
+                    // 重新尝试连接
+                    setTimeout(tryNextServer, 3000);
+                };
+                
+                socket.onmessage = function(event) {
+                    try {
+                        const data = JSON.parse(event.data);
+                        
+                        if (data.room !== roomId) return;
+                        
+                        switch (data.type) {
+                            case 'user-joined':
+                                if (data.id !== userId) {
+                                    addUser(data.id);
+                                    sendChatMessage('系统', `${data.id} 加入了房间`);
+                                    showToast(`${data.id} 加入了房间`, 'info');
+                                    
+                                    // 为新用户创建P2P连接
+                                    const peer = new SimplePeer({
+                                        initiator: true,
+                                        trickle: false,
+                                        config: {
+                                            iceServers: [
+                                                { urls: 'stun:stun.l.google.com:19302' },
+                                                { urls: 'stun:stun1.l.google.com:19302' }
+                                            ]
+                                        }
+                                    });
+                                    
+                                    peer.on('signal', function(data) {
+                                        socket.send(JSON.stringify({
+                                            type: 'signal',
+                                            room: roomId,
+                                            to: data.id,
+                                            from: userId,
+                                            signal: data
+                                        }));
+                                    });
+                                    
+                                    setupPeerEvents(peer, data.id);
+                                    peers[data.id] = peer;
+                                }
+                                break;
+                                
+                            case 'signal':
+                                if (data.to !== userId) return;
+                                
+                                let peer;
+                                if (!peers[data.from]) {
+                                    peer = new SimplePeer({
+                                        initiator: false,
+                                        trickle: false,
+                                        config: {
+                                            iceServers: [
+                                                { urls: 'stun:stun.l.google.com:19302' },
+                                                { urls: 'stun:stun1.l.google.com:19302' }
+                                            ]
+                                        }
+                                    });
+                                    setupPeerEvents(peer, data.from);
+                                    peers[data.from] = peer;
+                                } else {
+                                    peer = peers[data.from];
+                                }
+                                
+                                peer.signal(data.signal);
+                                break;
+                                
+                            case 'user-left':
+                                removeUser(data.id);
+                                sendChatMessage('系统', `${data.id} 离开了房间`);
+                                showToast(`${data.id} 离开了房间`, 'info');
+                                delete peers[data.id];
+                                break;
+                        }
+                    } catch (error) {
+                        console.error('处理消息时出错:', error);
+                    }
+                };
+            }
+            
+            // 开始尝试连接
+            tryNextServer();
         }
 
         function setupPeerEvents(peer, peerId) {
